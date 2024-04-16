@@ -1,0 +1,605 @@
+---
+title: "Final_project"
+author: "aijeanka"
+date: "2023-12-07"
+output: html_document
+---
+---
+title: "HIDS-6002-HW6:CDS, PI & QI"
+format: html
+editor: visual
+author: Aizhan Uteubayeva (NetID:au198)
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH",
+          host = "35.199.4.72",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          bigint = "numeric")
+```
+
+# 6002 Final Project: Asthmatic Smokers Care Plan
+
+## Aim:
+The report aims to asses the demographics and the care provided to asthmatic smoker's patients within the SyntheticMGUH database in the period of September 2022 and September 2023. 
+
+## Objectives:
+- Identify the asthmatic smokers population 
+- Identify the demographics
+- Identify the asthmatic smoker's state of care
+
+## I. Population Definition
+
+In this report, the asthmatic smoker's population is defined by the following criteria:
+
+### Step 1: Defining Asthmatic patients
+
+1) In order to determine the asthmatic smoker's population a temporary "asthma_patients" table is created using conditions, encounters, medications,careplan and immunization tables
+
+```{sql connection=con}
+-- DROP TABLE asthma_population
+```
+
+```{sql connection=con}
+SELECT patient
+INTO TEMP TABLE asthma_population
+-- SELECT COUNT(DISTINCT patient)
+FROM (
+  -- from conditions find the description of asthma
+  SELECT DISTINCT patient 
+  FROM conditions WHERE LOWER(description) LIKE  '%asthma%'
+  UNION
+  -- from encounters find the reason for asthma 
+  SELECT DISTINCT patient
+  FROM encounters WHERE LOWER(reasondescription) LIKE '%asthma%'
+  UNION
+  -- find the medication for the asthma 
+  SELECT DISTINCT patient
+  FROM medications WHERE LOWER(reasondescription) LIKE '%asthma%'
+  UNION
+  -- maintenance inhalers
+  SELECT DISTINCT patient
+  FROM medications 
+  WHERE code IN (95996, 349094, 616830, 1998774, 896209, 896006, 966529, 746815, 966524, 1547660, 1998772, 1536144)
+  UNION
+  -- rescue inhalers
+  SELECT DISTINCT patient
+  FROM medications
+  WHERE code IN (630208, 859088, 745752, 351137, 351136, 245314, 2123111, 746763)
+  UNION
+  -- selecting patients with the asthma the careplan
+  SELECT DISTINCT patient
+  FROM careplans WHERE LOWER(description) LIKE '%asthma%'
+  UNION
+  -- patient with immunization in the past year
+  SELECT DISTINCT patient
+  FROM immunizations WHERE description = 'Pneumococcal conjugate PCV 13'
+) AS asthma_patients
+```
+2) Double-checking of the other tables
+
+No mention of asthma in the description in the observations table
+```{sql connection=con}
+SELECT COUNT(DISTINCT patient)
+FROM observations WHERE LOWER(description) LIKE '%asthma%'
+```
+
+No mention of asthma in the description1 and description2 in the allergy table
+```{sql connection=con}
+SELECT DISTINCT patient
+FROM allergies 
+WHERE LOWER(description2) LIKE '%asthma%'
+UNION
+SELECT DISTINCT patient
+FROM allergies 
+WHERE LOWER(description1) LIKE '%asthma%'
+```
+
+Total count of revealed asthmatic smokers is now estimated to 8,996 in the database
+```{sql connection=con}
+SELECT COUNT(patient) as patient_count FROM asthma_population
+```
+
+### Step 2: Defining alive asthmatic patients
+
+The database was created in October 2023, thus the 2023-09-22 date was selected to subset the alive patients, or who died within the a year before 2023-09-22. For further analysis the fields such as birthdate, deathdate, race, gender and ethnicity are selected. A new "asthma_patients"table was created within the SQL.
+
+```{sql connection=con}
+-- DROP TABLE asthma_patients
+```
+```{sql connection=con}
+SELECT patient, birthdate, deathdate, race, ethnicity, gender, date_part('year', age('2022-09-22', birthdate)) AS age -- setting the age as well
+INTO TEMP TABLE asthma_patients
+FROM (
+  SELECT patient, birthdate, deathdate, race, ethnicity, gender
+  FROM asthma_population 
+  JOIN patients 
+  ON patients.id = asthma_population.patient 
+  -- selecting patients with NULL (alive) and with the deathdate before 2022-09-12 
+  WHERE deathdate IS NULL OR deathdate >= '2022-09-22'
+) AS asthma_patients
+```
+In total, there are 8,244 asthmatic patients, who was alive within last year or died within that year
+````{sql connection=con}
+SELECT COUNT(patient) 
+FROM asthma_patients
+```
+Transferring the SQL table for further analysis into R
+````{sql connection=con, output.var = "asthma_patients"}
+SELECT * 
+FROM asthma_patients
+```
+
+### Step 3: Defining asthmatic smoking patients
+
+In order to look into the smoking asthmatic patients, we have identified that there are three values for smokers:
+```{sql connection=con }
+-- looking at all the distinct values with the smoking code 
+SELECT DISTINCT value
+FROM observations
+WHERE code = '72166-2'
+```
+
+In order to identify the asthmatic smokers population the value = 'Smokes tobacco daily (finding) is used, as well as any mention of the tobacco in the description in "conditions" table
+```{sql connection=con}
+-- DROP TABLE asthma_smokers
+```
+```{sql connection=con} 
+WITH AsthmaticSmokers AS (
+  SELECT DISTINCT a.patient, a.birthdate, a.deathdate, a.race, a.ethnicity, a.gender, date_part('year', age('2023-09-22', a.birthdate)) AS age
+  FROM asthma_patients a
+  WHERE a.patient IN (
+    SELECT DISTINCT o.patient
+    FROM observations o
+    WHERE o.code = '72166-2' AND o.value = 'Smokes tobacco daily (finding)'
+    UNION 
+    SELECT DISTINCT c.patient
+    FROM conditions c
+    WHERE LOWER(description) LIKE '%tobacco%'
+  )
+)
+
+SELECT * 
+INTO TEMP TABLE asthma_smokers
+FROM AsthmaticSmokers;
+```
+````{sql connection=con}
+SELECT COUNT(patient) 
+FROM asthma_smokers
+```
+In total, there are 177 asthmatic smokers, who was alive within last year or died within that year. Now transferring the SQL table for further analysis into R
+````{sql connection=con, output.var = "asthma_smokers"}
+SELECT * 
+FROM asthma_smokers
+```
+
+## Demographics of the asthmatic smokers
+
+### Age
+In order to calculate the age of the patients the age function first calculated the time between the patient's birthrate and the set date of 2023-09-22. Then the date_part is extracting the years from that interval aliasing as "age".
+
+#### Age distribution
+First, looking at the age distribution across asthmatic smoking patients by grouping in 10 years. However, we have identified some teenagers within the cohort, and changes the lowest group to 15-17. The prevalence of asthmatic smokers falls under the age group of 18-30 and lowest at 51-60. 
+
+```{sql connection=con, output.var = "smokers_age_counts"}
+SELECT
+  CASE
+    WHEN age BETWEEN 15 AND 17 THEN '15-17'
+    WHEN age BETWEEN 18 AND 30 THEN '18-30'
+    WHEN age BETWEEN 31 AND 40 THEN '31-40'
+    WHEN age BETWEEN 41 AND 50 THEN '41-50'
+    WHEN age BETWEEN 51 AND 60 THEN '51-60'
+    WHEN age BETWEEN 61 AND 70 THEN '61-70'
+    ELSE '71+'
+  END AS age_group,
+  COUNT(*) AS count
+FROM (
+  SELECT date_part('year', age('2023-09-22', birthdate)) AS age
+  FROM asthma_smokers
+) AS age_subquery
+GROUP BY age_group
+ORDER BY age_group;
+```
+
+Creating a bar plot for the age distribution across the asthmatic smoker patients
+```{r}
+library(ggplot2)
+ggplot(smokers_age_counts, aes(x = age_group, y = count)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  labs(title = "Asthmatic Smokers' Age Distribution", x = "", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{sql connection=con, output.var = "smokers_age"}
+SELECT
+    AVG(date_part('year', age('2023-09-22', birthdate))) AS average_age, 
+    gender,race, ethnicity
+FROM asthma_smokers
+GROUP BY gender, race, ethnicity
+```
+
+```{r}
+summary(smokers_age)
+```
+#### Average age of asthmatic smokers across men and women
+The average age of asthmatic smokers patients varies between men and women, between 30 y.o. and 24 y.o. respectively. 
+```{sql connection=con}
+SELECT
+    AVG(date_part('year', age('2023-09-22', birthdate))) AS average_age,
+    gender
+FROM asthma_smokers
+GROUP BY gender
+```
+#### Average age of asthmatic smokers across different races 
+Looking at the average age across different races, the Asian population has a higher average age compared to other races. By plotting the graph, we can identify the averge age across races is almost equally distributed. However, the highest average age fell under the category of the "other" race. 
+
+```{sql connection=con, output.var = "smokers_age_race"}
+SELECT
+    AVG(date_part('year', age('2023-09-22', birthdate))) AS average_age,
+    race
+FROM asthma_smokers
+GROUP BY race
+ORDER BY average_age
+```
+```{r}
+ggplot(smokers_age_race, aes(x = reorder(race, average_age), y = average_age)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  labs(title = "Asthmatic Smokers' Average Age by Race", x = "Race", y = "Average Age") +
+  scale_y_continuous(breaks = seq(0, 35, by = 5), limits = c(0, 35)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+```
+
+#### Average age of asthmatic smokers across the different ethnicities 
+The average age of the asthmatic smokers' is higher across the hispanic population.
+```{sql connection=con}
+SELECT
+    AVG(date_part('year', age('2023-09-22', birthdate))) AS average_age,
+    ethnicity
+FROM asthma_smokers
+GROUP BY ethnicity
+ORDER BY average_age
+```
+
+### Gender
+Within the subset of asthmatic smokers, the distribution across men and women is roughly equal.
+```{sql connection=con}
+SELECT gender, COUNT(*) AS gender_count
+FROM asthma_smokers
+GROUP BY gender
+```
+
+#### Distribution of women and race
+By plotting the distribution of women and race, the largest proportion falls into both black and white asthmatic smoking women. 
+```{sql connection=con,  output.var = "f_smokers_race"}
+SELECT
+    race,
+    (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM asthma_patients WHERE gender = 'F')) AS percentage
+FROM asthma_smokers
+WHERE gender = 'F'
+GROUP BY race
+ORDER BY percentage DESC
+```
+```{r}
+ggplot(f_smokers_race, aes(x = race, y = percentage, fill = race)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Percentage of Female Asthmatic Smokers by Race ",
+       x = "Race",
+       y = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+#### Distribution of men and race
+Similarly, by plotting the distribution of women and race, the largest proportion falls into both black and white asthmatic smoking men.
+```{sql connection=con, output.var = "m_smokers_race"}
+SELECT
+    race,
+    (COUNT(*) * 100.0 / (SELECT COUNT(*) FROM asthma_patients WHERE gender = 'M')) AS percentage
+FROM asthma_smokers
+WHERE gender = 'M'
+GROUP BY race
+ORDER BY percentage DESC
+```
+```{r}
+ggplot(m_smokers_race, aes(x = race, y = percentage, fill = race)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Percentage of Male Asthmatic Smokers by Race ",
+       x = "Race",
+       y = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+### Ethnicity
+
+The composition of asthmatic smokers by ethnicity, the prevalence falls under the non-hispanic group.
+
+```{sql connection=con }
+SELECT ethnicity, count(*) as patients
+FROM asthma_smokers
+GROUP BY ethnicity
+```
+
+### Summury of Risk Factors
+For the purpose of the presentation, we have created a summury of the asthmatic smokers' risk factors
+```{r}
+# Calculating percentages for each category
+children_percentage <- sum(asthma_smokers$age <= 18) / nrow(asthma_smokers) * 100
+adults_percentage <- sum(asthma_smokers$age > 18) / nrow(asthma_smokers) * 100
+male_percentage <- sum(asthma_smokers$gender == "M") / nrow(asthma_smokers) * 100
+female_percentage <- sum(asthma_smokers$gender == "F") / nrow(asthma_smokers) * 100
+black_percentage <- sum(asthma_smokers$race == "black") / nrow(asthma_smokers) * 100
+white_percentage <- sum(asthma_smokers$race == "white") / nrow(asthma_smokers) * 100
+
+# Creating the dataframe for plotting
+data <- data.frame(
+  Category = c("Children", "Adults", "Male", "Female", "Black", "White"),
+  Percentage = c(children_percentage, adults_percentage, male_percentage, female_percentage, black_percentage, white_percentage)
+)
+
+# Defining the order of the bars
+data$Category <- factor(data$Category, levels = c("Children", "Adults", "Male", "Female", "Black", "White"))
+
+# Creating the bar plot with thinner bars using ggplot2
+ggplot(data, aes(x = Category, y = Percentage, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.7) +  # Adjust the width (e.g., 0.5 for thinner bars)
+  labs(
+    title = "Asthmatic Smokers' Risk Factors",
+    x = "",
+    y = "Percentage"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels for better readability
+  ) +
+  scale_fill_brewer(palette = "Paired")  # Using a color palette for better differentiation
+```
+
+## Care plans
+
+### "careplans" table
+#### No Asthmatic Smoker care plan
+There are only two types of care plans that asthmatic smokers have been assigned with: Asthma and Childhood asthma. There is no Asthmatic Smoker care plan in the data. Moreover, 161 patients have not been assigned a care plan at all. 
+
+```{sql connection=con, output.var= smokers_careplan}
+SELECT COUNT(DISTINCT a.patient), c.reasondescription
+FROM careplans c
+JOIN asthma_smokers a ON c.patient = a.patient
+WHERE (LOWER(c.reasondescription) LIKE '%asthma%' OR c.reasondescription IS NULL)
+  AND c.stop IS NULL
+GROUP BY c.reasondescription
+```
+
+```{r}
+ggplot(smokers_careplan, aes(x = count, y = reasondescription)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Asthma Careplans Types for Asthmatic Smokers", x = "Count", y = "Reason Description") +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1)) +
+  coord_flip()
+```
+
+#### Low percentage of care plan received
+In the existing plans, there is a low percentage asthma smokers who have received an "Asthma" or a "Childhood asthma" care plan, with 0.5% and 35% respectively.
+
+```{sql connection=con}
+SELECT
+  (COUNT(DISTINCT a.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM asthma_smokers)) AS percentage,
+  c.reasondescription
+FROM careplans c
+JOIN asthma_smokers a
+ON c.patient = a.patient
+WHERE LOWER(c.reasondescription) LIKE '%asthma%'
+GROUP BY c.reasondescription;
+```
+#### Active care plan
+In order to evaluate the "active" state of patient, we had looked first into the "careplans" table, which contains the "start" and "stop" fields. If the plan is active the stop field must be recorded as a NULL. Only a 54 of the care plans is active.
+
+```{sql connection=con}
+SELECT COUNT(DISTINCT a.patient)
+FROM careplans c
+JOIN asthma_smokers a
+ON c.patient = a.patient
+WHERE c.stop IS NULL
+AND LOWER(c.reasondescription) LIKE '%asthma%'
+```
+
+The record has shown that there is about 65% of the asthmatic patients whose care plan is still active.
+```{sql connection=con}
+SELECT
+  (COUNT(DISTINCT a.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM asthma_patients)) AS percentage
+FROM careplans c
+JOIN asthma_smokers a 
+ON c.patient = a.patient
+WHERE c.stop IS NULL
+AND LOWER(c.reasondescription) LIKE '%asthma';
+```
+#### Activeness of the asthmatic smokers patients
+In order to evaluate how active the asthmatic smokers patient with the care plan was in the last year. It appears that the maximum amount the patient had an encounter with the "reasondescription" was 19 times.
+```{sql connection=con}
+SELECT a.patient, COUNT(DISTINCT e.id) AS total_encounters
+FROM asthma_smokers a
+JOIN careplans c ON a.patient = c.patient
+JOIN encounters e ON a.patient = e.patient
+WHERE c.stop IS NULL
+AND LOWER(c.reasondescription) LIKE '%asthma%'
+AND e.start > '2022-09-22'
+GROUP BY a.patient
+ORDER BY total_encounters DESC
+```
+
+### Vaccination
+
+#### "immunizations" table
+Within our asthmatic smokers population only one patient has received the Pneumacoccal conjugate PCV 13, a vaccine againts 13 types of certain strains of the bacterium Streptococcus pneumoniae, within the last year. The vaccine in normally administered within first two years of life or during the later stages of life. The administrations highly depends on the risk factors and not all asthmatic population hence may have it. 
+```{sql connection=con}
+SELECT COUNT(DISTINCT a.patient), i.description
+FROM immunizations i
+JOIN asthma_smokers a
+ON i.patient=a.patient
+WHERE description = 'Pneumococcal conjugate PCV 13'
+AND date >= '2022-09-22'
+GROUP BY i.description
+```
+The total of 0.5% of our asthmatic smoker's population has received the "Pneumococcal conjugate PCV 13" vaccine.
+```{sql connection=con}
+SELECT
+  (COUNT(DISTINCT a.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM asthma_smokers)) AS percentage,
+  i.description
+FROM immunizations i
+JOIN asthma_smokers a ON i.patient = a.patient
+WHERE i.description = 'Pneumococcal conjugate PCV 13'
+  AND i.date >= '2022-09-22'
+GROUP BY i.description
+```
+### Medication 
+In order to determine the prescription, the period within a year is set. The inactive prescription is sorted out by setting the "stop" field IS NULL and by putting our desired period of time within a year.
+
+#### Maintenance inhalers
+
+It appears there is a small percentage (12%) of maintenance inhalers prescribed to asthmatic smoker's only on the "Childhood asthma" care plan
+```{sql connection=con}
+SELECT m.reasondescription, 
+(COUNT(DISTINCT a.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM asthma_smokers)) AS percentage
+FROM medications m
+JOIN asthma_smokers a 
+ON a.patient = m.patient
+WHERE code IN (95996, 349094, 616830, 1998774, 896209, 896006, 966529, 746815, 966524, 1547660, 1998772, 1536144)
+AND LOWER(reasondescription) LIKE '%asthma%'
+AND (stop BETWEEN '2022-09-22' AND '2023-09-22' OR stop IS NULL) 
+GROUP BY m.reasondescription
+```
+
+#### Rescue inhalers
+Here, the larger percentage of the rescue inhalers is perscibed to asthmatic smoking patients with the "Childhood asthma"
+```{sql connection=con}
+SELECT m.reasondescription, 
+(COUNT(DISTINCT a.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM asthma_smokers)) AS percentage
+FROM medications m
+JOIN asthma_smokers a ON a.patient = m.patient
+WHERE code IN (630208, 859088, 745752, 351137, 351136, 245314, 2123111, 746763)
+AND LOWER(reasondescription) LIKE '%asthma%'
+AND (stop BETWEEN '2022-09-22' AND '2023-09-22' OR stop IS NULL) 
+GROUP BY m.reasondescription;
+```
+#### Activeness in prescription 
+
+In order to find how many time a specific patient had an encounter in the "medications" table for any type of inhaler within the set period of a year. It appears that the maximum amount of times a patient requested/received an inhaler within a year is 8 times.
+
+```{sql connection=con}
+SELECT a.patient, COUNT(DISTINCT m.encounter) AS encounter_count
+FROM medications m
+JOIN asthma_smokers a ON a.patient = m.patient
+WHERE m.code IN (95996, 349094, 616830, 1998774, 896209, 896006, 966529, 746815, 966524, 1547660, 1998772, 1536144, 630208, 859088, 745752, 351137, 351136, 245314, 2123111, 746763)
+AND LOWER(m.reasondescription) LIKE '%asthma%'
+AND (m.stop BETWEEN '2022-09-22' AND '2023-09-22' OR m.stop IS NULL)
+GROUP BY a.patient
+ORDER BY encounter_count DESC
+LIMIT 5
+```
+### Other reasons for the prescriptions that asthmatic smokers have received
+By plotting other reasons for prescription that asthmatic smokers receive, we can see that other diseases inlclude anemia, essential hypertension, lung non-small cell carcinoma, pre-diabetes, etc.
+```{sql connection=con, output.var = smokers_meds}
+SELECT 
+    p.reasondescription,
+    COUNT(p.reasondescription) AS description_count,
+    (COUNT(p.reasondescription) * 100.0 / SUM(COUNT(p.reasondescription)) OVER ()) AS percentage
+FROM asthma_smokers a
+LEFT JOIN medications p ON a.patient = p.patient
+GROUP BY p.reasondescription
+ORDER BY description_count DESC
+LIMIT 10
+```
+
+```{r}
+ggplot(smokers_meds, aes(x = percentage, y = reasondescription)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Prescription Reasons for the Asthmatic Smokers", x = "Proportion", y = "Reason Description")
+```
+
+### Procedures
+#### Types of procedures/assesments asthmatic smokers receive
+By looking at the procedures that asthmatic smokers undergo, we have revealed the presence of the spirometry test records (needed for the purpose of the proposal). However, names for some procedures is clashing: 
+
+1) Asthma Diagnosis:
+  Spirometry (procedure)
+  Measurement of respiratory function (procedure)
+  Asthma screening
+  Initial patient assesment - diagnosed with asthma?
+2) Chest procedures 
+  - Chest X-ray
+  - Plain chest X-ray (procedure)
+3) Individualized plan of care 
+4) Mental health 
+  - Assessment of anxiety (procedure)
+  - Depression screening (procedure)
+  - Depression screening
+5) Health risks education (procedure) 
+6) Subcutaneous immunotherapy 
+```{sql connection=con, output.var = smokers_procedures}
+SELECT p.description, COUNT(p.description) AS description_count
+FROM asthma_smokers a
+LEFT JOIN procedures p ON a.patient = p.patient
+GROUP BY p.description
+ORDER BY description_count DESC;
+```
+```{sql connection=con}
+SELECT p.description, COUNT(p.description) AS description_count
+FROM asthma_smokers a
+LEFT JOIN procedures p ON a.patient = p.patient
+WHERE p.description IN (
+    'Asthma screening',
+    'Chest X-ray',
+    'Plain chest X-ray (procedure)',
+    'Development of individualized plan of care (procedure)',
+    'Initial patient assessment (procedure)',
+    'Measurement of respiratory function (procedure)',
+    'Depression screening',
+    'Health risks education (procedure)',
+    'Spirometry (procedure)',
+    'Subcutaneous immunotherapy',
+    'Depression screening (procedure)',
+    'Assessment of anxiety (procedure)'
+    'Individualized plan of care'
+)
+GROUP BY p.description
+ORDER BY description_count DESC;
+```
+#### Spiromentry or Measurement of respiratory function
+Only half of the asthmatic smoker received the spirometry test within a year. 
+```{sql connection=con}
+SELECT 
+    COUNT(DISTINCT CASE WHEN spirometry_counts.spirometry_count > 0 THEN a.patient END) AS patients_with_spirometry,
+    COUNT(DISTINCT a.patient) AS total_asthma_smokers,
+    (COUNT(DISTINCT CASE WHEN spirometry_counts.spirometry_count > 0 THEN a.patient END) * 100.0 / NULLIF(COUNT(DISTINCT a.patient), 0)) AS percentage_with_spirometry
+FROM asthma_smokers a
+LEFT JOIN (
+    SELECT p.patient, COUNT(p.description) AS spirometry_count
+    FROM procedures p
+    WHERE p.description = 'Spirometry (procedure)' OR p.description = 'Measurement of respiratory function (procedure)'
+    GROUP BY p.patient
+) spirometry_counts ON a.patient = spirometry_counts.patient;
+
+```
+
+
+## Evaluation
+The report has summed up the demographics and care plans description of the asthmatic population with the September 2022 and September 2023.The key findings are:
+1) There is proportion of underaged asthmatic smokers. Yet, asthmatic smokers prevail between 20-30 year old 
+2) The distribution across gender, race and ethnicity is fairly even, with an exception that the report has shown that white and black smoking populations are suffering from asthma. However, could be constrained due the demographic's sample within the database
+3) There is no specific plan for the asthmatic smokers
+4) Small percentage of asthmatic smokers receive both maintenance and rescue inhalers
+5) There are reasons for prescription that asthmatic smokers receive, we can see that other diseases inlclude anemia, essential hypertension, lung non-small cell carcinoma, pre-diabetes, etc.
+6) The spirometry test is recorded, however has two names for the identification
+
+
+
